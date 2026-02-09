@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "clangd-mcp"
+version = "0.1.0"
+description = "MCP server for C/C++ code analysis via clangd and clang tools"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "mcp[cli]>=1.0.0",
+]
+
+[project.scripts]
+clangd-mcp = "clangd_mcp.server:main"

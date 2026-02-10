@@ -10,7 +10,7 @@ MCP server for C/C++ code analysis using clangd and clang tools. Provides diagno
 - **list_functions** — extract function/method declarations from a file
 - **clang_format** — format code using clang-format (dry-run or in-place)
 
-Falls back to compiler syntax checking if clangd is not available.
+Falls back to compiler syntax checking (clang++, g++, MSVC) if clangd is not available.
 
 ## Requirements
 

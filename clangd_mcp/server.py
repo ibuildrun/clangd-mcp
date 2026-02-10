@@ -43,6 +43,7 @@ def check_file(file_path: str, build_dir: str = "build") -> str:
     """
     clangd = _find_clangd()
     if not clangd:
+        # fallback to clang-check or direct compilation check
         return _check_with_compiler(file_path, build_dir)
 
     compile_db = os.path.join(build_dir, "compile_commands.json")
@@ -51,11 +52,12 @@ def check_file(file_path: str, build_dir: str = "build") -> str:
         cmd += [f"--compile-commands-dir={build_dir}"]
 
     result = _run_clang_tool(cmd, timeout=30)
-    output = result["stderr"]
+    output = result["stderr"]  # clangd outputs diagnostics to stderr
 
     if not output.strip():
         return f"No issues found in {file_path}"
 
+    # Parse clangd output
     diags = []
     for line in output.split("\n"):
         if re.match(r".+:\d+:\d+: (error|warning|note):", line):
@@ -68,19 +70,65 @@ def check_file(file_path: str, build_dir: str = "build") -> str:
 
 def _check_with_compiler(file_path: str, build_dir: str) -> str:
     """Fallback: check file with compiler syntax check."""
-    for compiler in ["clang++", "cl", "g++"]:
+    # Try clang++ and g++ first
+    for compiler in ["clang++", "g++"]:
         try:
-            if compiler == "cl":
-                cmd = [compiler, "/Zs", "/EHsc", file_path]
-            else:
-                cmd = [compiler, "-fsyntax-only", "-std=c++11", file_path]
+            cmd = [compiler, "-fsyntax-only", "-std=c++11", file_path]
             result = _run_clang_tool(cmd, timeout=15)
             if result["exit_code"] == 0:
                 return f"No syntax errors in {file_path}"
-            return f"Issues found:\n{result['stderr'][:3000]}"
+            if "Not found" not in result["stderr"]:
+                return f"Issues found:\n{result['stderr'][:3000]}"
         except Exception:
             continue
-    return "No C++ compiler found. Install clangd, clang++, or g++."
+
+    # Try MSVC cl.exe via Developer Command Prompt
+    cl_path = _find_msvc_cl()
+    if cl_path:
+        # Build include paths from build_dir compile info
+        include_args = _get_msvc_include_args(build_dir)
+        cmd = [cl_path, "/Zs", "/EHsc", "/std:c++14", "/W3"] + include_args + [file_path]
+        result = _run_clang_tool(cmd, timeout=30)
+        if result["exit_code"] == 0:
+            return f"No syntax errors in {file_path} (MSVC)"
+        output = result["stdout"] + "\n" + result["stderr"]
+        return f"Issues found (MSVC):\n{output[:3000]}"
+
+    return "No C++ compiler found. Install clangd, clang++, g++, or Visual Studio."
+
+
+def _find_msvc_cl() -> str:
+    """Find MSVC cl.exe via vswhere."""
+    vswhere = r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+    if not os.path.exists(vswhere):
+        return ""
+    try:
+        result = subprocess.run(
+            [vswhere, "-latest", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+             "-find", r"VC\Tools\MSVC\**\bin\Hostx64\x64\cl.exe"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            path = result.stdout.strip().split("\n")[0]
+            if os.path.exists(path):
+                return path
+    except Exception:
+        pass
+    return ""
+
+
+def _get_msvc_include_args(build_dir: str) -> list:
+    """Extract include directories from CMake cache or common paths."""
+    includes = []
+    if os.path.exists("src"):
+        includes.append("/Isrc")
+    for subdir in ["other/sdl/include", "other/freetype/include"]:
+        if os.path.exists(subdir):
+            includes.append(f"/I{subdir}")
+    gen_dir = os.path.join(build_dir, "src")
+    if os.path.exists(gen_dir):
+        includes.append(f"/I{gen_dir}")
+    return includes
 
 
 @mcp.tool()
@@ -96,6 +144,7 @@ def find_symbol(symbol: str, directory: str = "src", extensions: str = ".cpp,.h,
     matches = []
 
     for root, dirs, files in os.walk(directory):
+        # skip build and hidden dirs
         dirs[:] = [d for d in dirs if not d.startswith(".") and d != "build" and d != "external"]
         for fname in files:
             if not any(fname.endswith(ext) for ext in ext_list):
@@ -152,6 +201,7 @@ def list_functions(file_path: str) -> str:
     if not os.path.exists(file_path):
         return f"File not found: {file_path}"
 
+    # Try ctags first
     try:
         result = _run_clang_tool(
             ["ctags", "--fields=+n", "-o", "-", "--c++-kinds=fp", file_path], timeout=10
@@ -170,6 +220,7 @@ def list_functions(file_path: str) -> str:
     except Exception:
         pass
 
+    # Fallback: regex-based extraction
     func_pattern = re.compile(
         r"^[\w:*&<>\s]+\s+(\w[\w:]*)\s*\([^)]*\)\s*(const)?\s*\{?\s*$"
     )
@@ -202,6 +253,7 @@ def clang_format(file_path: str, style: str = "file", dry_run: bool = True) -> s
 
     cmd = ["clang-format", f"--style={style}"]
     if dry_run:
+        # show what would change
         with open(file_path, "r") as f:
             original = f.read()
         result = _run_clang_tool(cmd + [file_path], timeout=10)
@@ -210,6 +262,7 @@ def clang_format(file_path: str, style: str = "file", dry_run: bool = True) -> s
         formatted = result["stdout"]
         if original == formatted:
             return f"File {file_path} is already formatted."
+        # simple diff
         orig_lines = original.split("\n")
         fmt_lines = formatted.split("\n")
         diffs = []
